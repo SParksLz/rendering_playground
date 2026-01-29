@@ -87,24 +87,14 @@ def sphere_render(
     ray.origin = cam.origin
     ray.direction = get_ray_direction(cam, uv)
 
+
+    # color = normal(ray, p[2], r[2])
+    # color = normal(ray, p[1], r[1])
     color = normal(ray, p[0], r[0])
 
-    #TODO : hit sphere and get color
+    #TODO : hit multiple spheres and get color
+    #... and more complex logic
 
-    # breakpoint()
-    
-    # 简单的 ray tracing 示例：根据 uv 坐标生成颜色
-    # 这里可以替换为实际的 ray tracing 逻辑
-    # result = hit_sphere(ray, p[0], r[0])
-    # # print(result)
-    # if result:
-    #     color = wp.vec3(1.0, 0.0, 0.0)
-    # else:
-    #     color = wp.vec3(0.0, 0.0, 0.0)
-
-    # output[tid] = color
-
-    # color = wp.vec3(uv[0], uv[1], 0.0)
     output[tid] = color
 
 
