@@ -4,6 +4,14 @@ import enum
 from source.rtscene import RtScene
 from source.canvas import Canvas
 
+from pathlib import Path
+
+
+@wp.struct
+class HitRecord:
+    t: float = float(0.0)
+    p: wp.vec3 = wp.vec3(0.0, 0.0, 0.0)
+    normal: wp.vec3 = wp.vec3(0.0, 0.0, 0.0)
 
 @wp.struct
 class CameraConfig:
@@ -44,53 +52,151 @@ def hit_sphere(
     ray: Ray, #ray
     center: wp.vec3, #position of sphere
     radius: float, #radius of sphere
-) -> float:
+    t_min: float,
+    t_max: float,
+    hit_record_array: wp.array(dtype=HitRecord),
+    tid: int,
+) -> bool:
     oc = ray.origin - center
     a = wp.dot(ray.direction, ray.direction)
-    b = 2.0 * wp.dot(oc, ray.direction)
+    b = wp.dot(oc, ray.direction)
     c = wp.dot(oc, oc) - radius * radius
-    discriminant = b * b - 4.0 * a * c
-    if discriminant < 0.0:
-        return -1.0
-    else:
-        return (-b - wp.sqrt(discriminant)) / (2.0 * a)
-    # return discriminant > 0
+    discriminant = b * b - a * c
+
+    if discriminant > 0.0:
+        temp = (-b - wp.sqrt(discriminant)) / a
+        if temp < t_max and temp > t_min:
+            hit_record_array[tid].t = temp
+            hit_record_array[tid].p = point_at_parameter(ray, hit_record_array[tid].t)
+            hit_record_array[tid].normal = (hit_record_array[tid].p - center) / radius
+            return True
+        temp = (-b + wp.sqrt(discriminant)) / a
+        if temp < t_max and temp > t_min:
+            hit_record_array[tid].t = temp
+            hit_record_array[tid].p = point_at_parameter(ray, hit_record_array[tid].t)
+            hit_record_array[tid].normal = (hit_record_array[tid].p - center) / radius
+            return True
+    return False
+
+# @wp.func
+# def hit_multi_sphere(
+#     ray: Ray,
+#     p: wp.array(dtype=wp.vec3),
+#     r: wp.array(dtype=float),
+#     t_min: float,
+#     t_max: float,
+#     # hit_record: HitRecord,
+# ) -> tuple[bool, HitRecord]:
+#     hit_any = bool(False)
+#     closet_so_far = t_max
+
+#     hit_record = HitRecord()
+
+#     for i in range(p.shape[0]):
+#         temp = HitRecord()
+#         if hit_sphere(ray, p[i], r[i], t_min, closet_so_far, temp):
+#             hit_any = True
+#             closet_so_far = temp.t
+#             hit_record.t = temp.t
+#             hit_record.p = temp.p
+#             hit_record.normal = temp.normal
+#     return hit_any, hit_record
+
+
+
 @wp.func
 def normal(
     ray: Ray,
-    p: wp.vec3, 
-    r: float,
+    p: wp.array(dtype=wp.vec3), 
+    r: wp.array(dtype=float),
+    t_min: float,
+    t_max: float,
+    hit_record_array: wp.array(dtype=HitRecord),
+    tid: int,
 ):
-    result = hit_sphere(ray, p, r)
-    if result > 0.0:
-        n = wp.normalize(point_at_parameter(ray, result) - wp.vec3(0.0, 0.0, -1.0))
-        return 0.5 * n + wp.vec3(0.5, 0.5, 0.5)
+
+
+    # result, hit_record= hit_multi_sphere(ray, p, r, t_min, t_max)
+    hit_any = bool(False)
+    closet_so_far = t_max
+
+    for i in range(p.shape[0]):
+        # temp = HitRecord()
+        if hit_sphere(ray, p[i], r[i], t_min, closet_so_far, hit_record_array, tid):
+            hit_any = True
+            closet_so_far = hit_record_array[tid].t
+            # hit_record[0] = temp
+
+    if hit_any:
+        # n = wp.normalize(point_at_parameter(ray, hit_record.t) - wp.vec3(0.0, 0.0, -1.0))
+        return 0.5 * wp.vec3(
+            hit_record_array[tid].normal.x + 1.0,
+            hit_record_array[tid].normal.y + 1.0,
+            hit_record_array[tid].normal.z + 1.0,
+        )
     unit_direction = wp.normalize(ray.direction)
     t = 0.5 * (unit_direction.y + 1.0)
     return (1.0 - t) * wp.vec3(1.0, 1.0, 1.0) + t * wp.vec3(0.5, 0.7, 1.0)
 
 @wp.kernel
 def sphere_render(
+    canvas_width: wp.int32,
+    canvas_height: wp.int32,
     uvs: wp.array(dtype=wp.vec2),
     output: wp.array(dtype=wp.vec3),
     camera: wp.array(dtype=CameraConfig),
     p: wp.array(dtype=wp.vec3),
     r: wp.array(dtype=float),
+    hit_record_array: wp.array(dtype=HitRecord),
 ):
     tid = wp.tid()
+
     uv = uvs[tid]
-    cam = camera[0]
 
-    # sphere_count = p.shape[0]
+    color = wp.vec3(0.0, 0.0, 0.0)
 
-    ray = Ray()
-    ray.origin = cam.origin
-    ray.direction = get_ray_direction(cam, uv)
+    # average multiple rays to get a more accurate color
+    for i in range(100):
+        seed_x = wp.uint32(tid * 7919 + i * 2)
+        seed_y = wp.uint32(tid * 7919 + i * 2 + 1)
+
+        cam = camera[0]
+        # uv.x += wp.randf(seed) / float(canvas_width)
+        # uv.y += wp.randf(seed) / float(canvas_height)
+
+        temp = wp.vec2(
+            uv.x + (wp.randf(seed_x) / float(canvas_width)),
+            uv.y + (wp.randf(seed_y) / float(canvas_height)),
+        )
+
+
+
+        ray = Ray()
+        ray.origin = cam.origin
+        ray.direction = get_ray_direction(
+            cam, temp)
+
+
+        color += normal(ray, p, r, 0.0, wp.inf, hit_record_array, tid)
+
+    color /= 100.0
+
+
+
+    # if result:
+    #     color = 0.5 * wp.normalize(hit_record.normal) + wp.vec3(0.5, 0.5, 0.5)
+
+    #     # print(color)
+    # else:
+    #     color = wp.vec3(0.0, 0.0, 0.0)
+    # if hit_record.t > 0.0:
+    #     color = hit_record.normal
+    # else:
 
 
     # color = normal(ray, p[2], r[2])
     # color = normal(ray, p[1], r[1])
-    color = normal(ray, p[0], r[0])
+    # color = normal(ray, p[0], r[0])
 
     #TODO : hit multiple spheres and get color
     #... and more complex logic
@@ -157,12 +263,19 @@ def make_camera_config(
 
 
 if __name__ == "__main__":
-    canvas = Canvas()
+    temp_path = Path("./temp")
+    temp_path.mkdir(exist_ok=True)
+    
+    canvas = Canvas(
+        width=1920,
+        height=1080,
+    )
     device = wp.get_preferred_device()
     RtScene.set_device(device)
     RtScene.add_sphere(position=(0.0, 0.0, -1.0), radius=0.5)
-    RtScene.add_sphere(position=(0.0, 0.5, -2.0), radius=0.5)
-    RtScene.add_sphere(position=(0.0, -100.5, -1), radius=100.0)
+    RtScene.add_sphere(position=(-0.5, -0.15, -0.55), radius=0.15)
+    RtScene.add_sphere(position=(2.0, 0.0, -2.0), radius=0.5)
+    RtScene.add_sphere(position=(0.0, -100.5, -1.0), radius=100.0)
 
     #sphere data
     p, r = RtScene.test_get_sphere_warp_array()
@@ -189,16 +302,24 @@ if __name__ == "__main__":
     # 创建输出数组
     output = wp.zeros(canvas.width * canvas.height, dtype=wp.vec3, device=device)
 
-    # 运行 ray tracing kernel
-    wp.launch(
-        kernel=sphere_render,
-        dim=canvas.width * canvas.height,
-        inputs=[
-            uvs_wp, output, camera_arr,
-            p, r,
-        ],
-    )
+    hit_record = wp.array(dtype=HitRecord, shape=(canvas.width * canvas.height, ), device=device)
 
-    save_to_image(output, "ray_trace_result.png")
+    # 运行 ray tracing kernel
+    for i in range(5):
+        with wp.ScopedTimer("rendering", active=True):
+            wp.launch(
+                kernel=sphere_render,
+                dim=canvas.width * canvas.height,
+                inputs=[
+                    canvas.width, canvas.height,
+                    uvs_wp, output, camera_arr,
+                    p, r,
+                    hit_record,
+                ],
+            )
+
+
+
+    save_to_image(output, str(temp_path / "ray_trace_result.png"))
     
     
