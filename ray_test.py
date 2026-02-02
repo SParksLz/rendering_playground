@@ -102,6 +102,54 @@ def hit_sphere(
 #             hit_record.normal = temp.normal
 #     return hit_any, hit_record
 
+@wp.func
+def random_in_unit_sphere(seed: wp.uint32):
+    # do-while: 在 [-1,1)^3 立方体内随机取点，若在单位球外则重试，直到落在球内；wp.randf 需要 uint32 类型的 seed
+    s = seed
+    p = 2.0 * wp.vec3(wp.randf(s), wp.randf(s + wp.uint32(1)), wp.randf(s + wp.uint32(2))) - wp.vec3(1.0, 1.0, 1.0)
+    while wp.dot(p, p) >= 1.0:
+        s = s + wp.uint32(3)  # 每次重试用新的三个随机数，避免死循环
+        p = 2.0 * wp.vec3(wp.randf(s), wp.randf(s + wp.uint32(1)), wp.randf(s + wp.uint32(2))) - wp.vec3(1.0, 1.0, 1.0)
+    return p
+
+
+@wp.func
+def ray_color(
+    ray: Ray,
+    p: wp.array(dtype=wp.vec3),
+    r: wp.array(dtype=float),
+    t_min: float,
+    t_max: float,
+    hit_record_array: wp.array(dtype=HitRecord),
+    tid: int,
+    max_depth: int,
+    base_seed: wp.uint32,
+) -> wp.vec3:
+    """图中 color 逻辑：击中则 target = p + normal + random_in_unit_sphere()，沿新射线递归（这里用循环模拟）；未击中则天空渐变。"""
+    attenuation = wp.vec3(1.0, 1.0, 1.0)
+    current_ray = ray
+    for depth in range(max_depth):
+        hit_any = bool(False)
+        closet_so_far = t_max
+        for i in range(p.shape[0]):
+            if hit_sphere(current_ray, p[i], r[i], t_min, closet_so_far, hit_record_array, tid):
+                hit_any = True
+                closet_so_far = hit_record_array[tid].t
+        if hit_any:
+            hit_p = hit_record_array[tid].p
+            hit_n = hit_record_array[tid].normal
+            # 每次弹跳用不同 seed，避免随机序列重复
+            bounce_seed = base_seed + wp.uint32(depth * 3)
+            target = hit_p + hit_n + random_in_unit_sphere(bounce_seed)
+            attenuation = attenuation * 0.5  # Warp 不支持 vec3 * vec3，标量乘等价
+            current_ray = Ray(origin=hit_p, direction=target - hit_p)
+        else:
+            unit_direction = wp.normalize(current_ray.direction)
+            t = 0.5 * (unit_direction.y + 1.0)
+            sky = (1.0 - t) * wp.vec3(1.0, 1.0, 1.0) + t * wp.vec3(0.5, 0.7, 1.0)
+            # Warp 不支持 vec3 * vec3，逐分量相乘
+            return wp.vec3(attenuation.x * sky.x, attenuation.y * sky.y, attenuation.z * sky.z)
+    return wp.vec3(0.0, 0.0, 0.0)
 
 
 @wp.func
@@ -176,8 +224,9 @@ def sphere_render(
         ray.direction = get_ray_direction(
             cam, temp)
 
-
-        color += normal(ray, p, r, 0.0, wp.inf, hit_record_array, tid)
+        # 图中 color 逻辑（漫反射弹跳）；若要用简单法线着色可改回 normal(...)。base_seed 用 uint32 供 randf 使用
+        base_seed = wp.uint32(tid * 7919 + i * 100)
+        color += ray_color(ray, p, r, 0.0, wp.inf, hit_record_array, tid, 50, base_seed)
 
     color /= 100.0
 
@@ -267,15 +316,28 @@ if __name__ == "__main__":
     temp_path.mkdir(exist_ok=True)
     
     canvas = Canvas(
-        width=1920,
-        height=1080,
+        width=192,
+        height=108,
     )
     device = wp.get_preferred_device()
+    radius_test = 0.3
+    y_test = radius_test - 0.5
     RtScene.set_device(device)
     RtScene.add_sphere(position=(0.0, 0.0, -1.0), radius=0.5)
-    RtScene.add_sphere(position=(-0.5, -0.15, -0.55), radius=0.15)
-    RtScene.add_sphere(position=(2.0, 0.0, -2.0), radius=0.5)
+    RtScene.add_sphere(position=(1.0, y_test, -1.2), radius=radius_test)
     RtScene.add_sphere(position=(0.0, -100.5, -1.0), radius=100.0)
+
+    # generate random x, z sphere with the relation of radius_test and y_test
+    # radius range is (0.1 - 0.13)
+    width_range = 3.2
+    depth_range = 3
+    global_scale = 0.5
+    for i in range(250):
+        radius = (wp.randf(wp.uint32(i * 100 + 2)) * 0.03 + 0.1) * global_scale
+        y = radius - 0.5
+        x = (wp.randf(wp.uint32(i * 100)) * 2.0 - 1.0) * width_range
+        z = (wp.randf(wp.uint32(i * 100 + 1)) * 2.0 - 1.0) * depth_range
+        RtScene.add_sphere(position=(x, y, z), radius=radius)
 
     #sphere data
     p, r = RtScene.test_get_sphere_warp_array()
@@ -305,18 +367,17 @@ if __name__ == "__main__":
     hit_record = wp.array(dtype=HitRecord, shape=(canvas.width * canvas.height, ), device=device)
 
     # 运行 ray tracing kernel
-    for i in range(5):
-        with wp.ScopedTimer("rendering", active=True):
-            wp.launch(
-                kernel=sphere_render,
-                dim=canvas.width * canvas.height,
-                inputs=[
-                    canvas.width, canvas.height,
-                    uvs_wp, output, camera_arr,
-                    p, r,
-                    hit_record,
-                ],
-            )
+    with wp.ScopedTimer("rendering", active=True):
+        wp.launch(
+            kernel=sphere_render,
+            dim=canvas.width * canvas.height,
+            inputs=[
+                canvas.width, canvas.height,
+                uvs_wp, output, camera_arr,
+                p, r,
+                hit_record,
+            ],
+        )
 
 
 
