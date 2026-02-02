@@ -5,8 +5,6 @@ from source.rtscene import RtScene
 from source.canvas import Canvas
 
 from pathlib import Path
-
-
 @wp.struct
 class HitRecord:
     t: float = float(0.0)
@@ -125,7 +123,8 @@ def ray_color(
     max_depth: int,
     base_seed: wp.uint32,
 ) -> wp.vec3:
-    """图中 color 逻辑：击中则 target = p + normal + random_in_unit_sphere()，沿新射线递归（这里用循环模拟）；未击中则天空渐变。"""
+    """图中 color 逻辑：击中则 target = p + normal + random_in_unit_sphere()，沿新射线递归（这里用循环模拟）；未击中则天空渐变。
+    同心圆纹路常见原因：(1) 反射射线起点在表面上，浮点误差/ t 量化形成等 t 圆；(2) 弹跳 seed 步长太小，相邻弹跳随机数相关；(3) 大地等距处 t 量化明显。"""
     attenuation = wp.vec3(1.0, 1.0, 1.0)
     current_ray = ray
     for depth in range(max_depth):
@@ -138,11 +137,13 @@ def ray_color(
         if hit_any:
             hit_p = hit_record_array[tid].p
             hit_n = hit_record_array[tid].normal
-            # 每次弹跳用不同 seed，避免随机序列重复
-            bounce_seed = base_seed + wp.uint32(depth * 3)
+            # 沿法线小偏移反射射线起点，避免自交和 t 量化造成的同心圆纹路（等 t 圆）
+            ray_origin_offset = hit_p + hit_n * 1e-4
+            # 弹跳 seed 用较大步长，避免相邻弹跳随机数相关、平均后形成环状结构
+            bounce_seed = base_seed + wp.uint32(depth * 7919)
             target = hit_p + hit_n + random_in_unit_sphere(bounce_seed)
             attenuation = attenuation * 0.5  # Warp 不支持 vec3 * vec3，标量乘等价
-            current_ray = Ray(origin=hit_p, direction=target - hit_p)
+            current_ray = Ray(origin=ray_origin_offset, direction=target - ray_origin_offset)
         else:
             unit_direction = wp.normalize(current_ray.direction)
             t = 0.5 * (unit_direction.y + 1.0)
@@ -203,32 +204,32 @@ def sphere_render(
 
     color = wp.vec3(0.0, 0.0, 0.0)
 
-    # average multiple rays to get a more accurate color
-    for i in range(100):
-        seed_x = wp.uint32(tid * 7919 + i * 2)
-        seed_y = wp.uint32(tid * 7919 + i * 2 + 1)
+    sample_count = int(128)
+
+    # 大素数混入 tid 与 sample_i，打散种子空间，减少相邻像素/样本的随机数相关性，避免一圈圈纹路（空间相关噪声）
+    u = wp.uint32(tid)
+    for sample_i in range(sample_count):
+        v = wp.uint32(sample_i)
+        seed_x = u * wp.uint32(2654435761) + v * wp.uint32(2246822519)
+        seed_y = u * wp.uint32(2654435761) + v * wp.uint32(2246822519) + wp.uint32(1)
 
         cam = camera[0]
-        # uv.x += wp.randf(seed) / float(canvas_width)
-        # uv.y += wp.randf(seed) / float(canvas_height)
 
         temp = wp.vec2(
             uv.x + (wp.randf(seed_x) / float(canvas_width)),
             uv.y + (wp.randf(seed_y) / float(canvas_height)),
         )
 
-
-
         ray = Ray()
         ray.origin = cam.origin
         ray.direction = get_ray_direction(
             cam, temp)
 
-        # 图中 color 逻辑（漫反射弹跳）；若要用简单法线着色可改回 normal(...)。base_seed 用 uint32 供 randf 使用
-        base_seed = wp.uint32(tid * 7919 + i * 100)
+        base_seed = u * wp.uint32(2654435761) + v * wp.uint32(2246822519) + wp.uint32(2)
         color += ray_color(ray, p, r, 0.0, wp.inf, hit_record_array, tid, 50, base_seed)
 
-    color /= 100.0
+
+    color /= float(sample_count)
 
 
 
@@ -316,8 +317,8 @@ if __name__ == "__main__":
     temp_path.mkdir(exist_ok=True)
     
     canvas = Canvas(
-        width=192,
-        height=108,
+        width=960,
+        height=540,
     )
     device = wp.get_preferred_device()
     radius_test = 0.3
